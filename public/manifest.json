@@ -1,16 +1,24 @@
 {
   "id": "/",
+  "lang": "pt-BR",
   "short_name": "Antonio Furtado",
   "name": "Antonio Furtado - Consultor Imobiliário",
   "description": "Sistema de Laudos e Vistorias Imobiliárias - Antonio Furtado Consultor Imobiliário",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "window-controls-overlay", "minimal-ui"],
   "orientation": "portrait",
   "background_color": "#0B2240",
   "theme_color": "#0B2240",
   "categories": ["business", "productivity", "utilities"],
   "prefer_related_applications": false,
+  "serviceworker": {
+    "src": "/sw.js",
+    "scope": "/",
+    "type": "classic",
+    "update_via_cache": "none"
+  },
   "icons": [
     {
       "src": "/icon-192.png",

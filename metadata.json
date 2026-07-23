@@ -1,0 +1,6 @@
+{
+  "name": "VistoriaPro - Gestão de Vistorias Imobiliárias",
+  "description": "Sistema completo de vistoria de imóveis com histórico em banco de dados, laudo técnico detalhado e geração de PDF com fotos e assinaturas.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

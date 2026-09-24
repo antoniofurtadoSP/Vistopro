@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { X, Building2, Save, Check } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { X, Building2, Save, Upload, RotateCcw, Image as ImageIcon } from 'lucide-react';
 import { EmpresaInfo } from '../types';
+import { getSafeLogoSrc, LOCAL_LOGO_URL, OFFICIAL_BLOGGER_LOGO_URL } from '../assets/defaultLogo';
 
 interface EmpresaConfigModalProps {
   empresa: EmpresaInfo;
@@ -10,6 +11,24 @@ interface EmpresaConfigModalProps {
 
 export const EmpresaConfigModal: React.FC<EmpresaConfigModalProps> = ({ empresa, onSave, onClose }) => {
   const [formData, setFormData] = useState<EmpresaInfo>({ ...empresa });
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setFormData((prev) => ({ ...prev, logoUrl: reader.result as string }));
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleResetLogo = () => {
+    setFormData((prev) => ({ ...prev, logoUrl: OFFICIAL_BLOGGER_LOGO_URL }));
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -95,14 +114,58 @@ export const EmpresaConfigModal: React.FC<EmpresaConfigModalProps> = ({ empresa,
             />
           </div>
 
-          <div>
-            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">URL do Logo (Banner / PDF)</label>
+          <div className="space-y-2">
+            <label className="block font-semibold text-slate-700 dark:text-slate-300">
+              Logo da Empresa (Banner e Laudo PDF)
+            </label>
+
+            {/* Preview do Logo */}
+            <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="bg-white p-2 rounded-lg border border-slate-200 shadow-xs max-w-[200px] flex items-center justify-center">
+                <img 
+                  src={getSafeLogoSrc(formData.logoUrl)} 
+                  alt="Preview Logo" 
+                  className="max-h-12 w-auto object-contain"
+                  onError={(e) => { e.currentTarget.src = LOCAL_LOGO_URL; }}
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileUpload} 
+                  accept="image/*" 
+                  className="hidden" 
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Trocar Imagem
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetLogo}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg text-xs font-medium transition-colors"
+                  title="Restaurar logo oficial Antonio Furtado"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Oficial
+                </button>
+              </div>
+            </div>
+
             <input
               type="text"
               value={formData.logoUrl || ''}
               onChange={(e) => setFormData({ ...formData, logoUrl: e.target.value })}
-              placeholder="https://..."
-              className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+              placeholder="https://... ou arquivo local"
+              className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-[11px] text-slate-700 dark:text-slate-300 font-mono"
             />
           </div>
 

@@ -8,6 +8,7 @@ import {
 import { Vistoria, EmpresaInfo } from '../types';
 import { generateVistoriaPdf } from '../services/pdfGenerator';
 import { dbService } from '../services/api';
+import { getSafeLogoSrc, LOCAL_LOGO_URL } from '../assets/defaultLogo';
 
 interface VistoriaDetailModalProps {
   vistoria: Vistoria;
@@ -219,6 +220,33 @@ export const VistoriaDetailModal: React.FC<VistoriaDetailModalProps> = ({
 
         {/* Modal Body Content */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          
+          {/* Header Banner com Logo Oficial do Laudo */}
+          <div className="bg-white dark:bg-slate-800/80 rounded-xl p-4 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+            <div className="flex flex-col sm:flex-row items-center sm:items-center gap-3 text-center sm:text-left">
+              <img 
+                src={getSafeLogoSrc(empresa?.logoUrl)}
+                alt={empresa?.nomeFantasia || 'Antonio Furtado Consultor Imobiliário'}
+                className="max-h-12 sm:max-h-14 w-auto object-contain"
+                onError={(e) => { e.currentTarget.src = LOCAL_LOGO_URL; }}
+                referrerPolicy="no-referrer"
+              />
+              <div>
+                <p className="text-xs font-extrabold uppercase tracking-wider text-[#0B2240] dark:text-amber-400">
+                  {empresa?.nomeFantasia || 'Antonio Furtado Consultor Imobiliário'}
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  CRECI: {empresa?.creci || '208024'} • CNPJ: {empresa?.cnpj || 'Não informado'}
+                </p>
+              </div>
+            </div>
+            <div className="text-center sm:text-right w-full sm:w-auto border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-100 dark:border-slate-700">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400 block">Contato & Agendamentos:</span>
+              <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                {empresa?.telefone || '(11) 96904-3012'}
+              </span>
+            </div>
+          </div>
           
           {/* TAB 1: AMBIENTES */}
           {activeTab === 'ambientes' && (

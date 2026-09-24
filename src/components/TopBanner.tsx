@@ -1,12 +1,13 @@
 import React from 'react';
 import { EmpresaInfo } from '../types';
+import { getSafeLogoSrc, LOCAL_LOGO_URL } from '../assets/defaultLogo';
 
 interface TopBannerProps {
   empresa?: EmpresaInfo;
 }
 
 export const TopBanner: React.FC<TopBannerProps> = ({ empresa }) => {
-  const logoSrc = empresa?.logoUrl || 'https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEjQCg77zUT43bZxFpwtQv8VnbT6iNll_bgvVVG9xRlvSVzZ6IL25hl4cjtp0ZZZh3YwIlykgT0jn5SYPBIxjMSFzzmc1YwbUBmLCY8_9hVMFX6_UhlSAe_Zmmy52tkhPuFCIRUmEWccW6r493-6dX9k6lyHbXYvWieQ21xAzo59aryPb1mcvb6juDpp0Zo/s1600/logo.jpg';
+  const logoSrc = getSafeLogoSrc(empresa?.logoUrl);
 
   return (
     <div className="w-full bg-white text-slate-900 border-b border-slate-200 shadow-sm py-4 px-4 sm:px-6">
@@ -19,6 +20,10 @@ export const TopBanner: React.FC<TopBannerProps> = ({ empresa }) => {
             alt="Antonio Furtado Consultor Imobiliário Logo" 
             className="max-h-24 sm:max-h-28 md:max-h-32 w-auto object-contain transition-transform hover:scale-105"
             referrerPolicy="no-referrer"
+            onError={(e) => {
+              // Em caso de falha de rede da URL externa, recorre imediatamente à logo local
+              e.currentTarget.src = LOCAL_LOGO_URL;
+            }}
           />
         </div>
 

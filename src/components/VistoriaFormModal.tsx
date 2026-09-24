@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, Plus, Trash2, Camera, Check, ChevronRight, ChevronLeft, 
   Building2, User, FileText, CheckCircle2, ShieldCheck, Upload,
-  Bed, Bath, Sofa, Utensils, Car, Copy, PlusCircle, Layers
+  Bed, Bath, Sofa, Utensils, Car, Copy, PlusCircle, Layers,
+  Save, AlertCircle, RefreshCw, Eye, Sparkles, Image as ImageIcon
 } from 'lucide-react';
-import { Vistoria, TipoVistoria, StatusVistoria, Ambiente, ItemAmbiente, EstadoItem } from '../types';
+import { Vistoria, TipoVistoria, StatusVistoria, Ambiente, ItemAmbiente, EstadoItem, FotoItem } from '../types';
+import { optimizeMultipleImageFiles } from '../services/imageOptimizer';
+import { draftService, VistoriaDraftInfo } from '../services/draftService';
 
 interface VistoriaFormModalProps {
   initialVistoria?: Vistoria | null;
@@ -53,6 +56,15 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
   const [step, setStep] = useState<number>(1);
   const [customRoomName, setCustomRoomName] = useState<string>('');
   const [showCustomRoomInput, setShowCustomRoomInput] = useState<boolean>(false);
+
+  // Draft, Auto-save & Optimization states
+  const [draftInfo, setDraftInfo] = useState<VistoriaDraftInfo | null>(null);
+  const [showDraftNotice, setShowDraftNotice] = useState<boolean>(false);
+  const [lastAutoSave, setLastAutoSave] = useState<string | null>(null);
+  const [isSavingDraft, setIsSavingDraft] = useState<boolean>(false);
+  const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
+  const [optimizingProgress, setOptimizingProgress] = useState<{ current: number; total: number } | null>(null);
+  const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
 
   // Form State
   const [formData, setFormData] = useState<Vistoria>(() => {
@@ -119,55 +131,152 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
     return lower.includes('dormitório') || lower.includes('dormitorio') || lower.includes('quarto') || lower.includes('suíte') || lower.includes('suite');
   }).length;
 
-  // Handle Photo File Upload
-  const handlePhotoUpload = (ambienteId: string, itemId?: string, e?: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e?.target.files;
-    if (!files || files.length === 0) return;
+  // Check for existing draft on mount if creating a new vistoria
+  useEffect(() => {
+    if (!initialVistoria) {
+      const existingDraft = draftService.obterRascunho();
+      if (existingDraft && existingDraft.vistoria) {
+        setDraftInfo(existingDraft);
+        setShowDraftNotice(true);
+      }
+    }
+  }, [initialVistoria]);
 
-    Array.from(files).forEach((file: File) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const url = reader.result as string;
-        setFormData((prev) => {
-          const updatedAmbientes = prev.ambientes.map((amb) => {
-            if (amb.id !== ambienteId) return amb;
+  // Debounced Auto-save to LocalStorage
+  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-            if (itemId) {
-              const updatedItens = amb.itens.map((it) => {
-                if (it.id !== itemId) return it;
-                return {
-                  ...it,
-                  fotos: [
-                    ...it.fotos,
-                    {
-                      id: 'ft-' + Date.now() + Math.random(),
-                      url,
-                      descricao: file.name,
-                      dataHora: new Date().toISOString(),
-                    },
-                  ],
-                };
-              });
-              return { ...amb, itens: updatedItens };
-            } else {
+  useEffect(() => {
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+    }
+
+    autoSaveTimeoutRef.current = setTimeout(() => {
+      // Only auto-save if the user actually entered some data
+      const hasContent = Boolean(
+        formData.imovel.endereco?.trim() ||
+        formData.inquilinoNome?.trim() ||
+        formData.ambientes.some(a => (a.fotosGerais && a.fotosGerais.length > 0) || a.itens.some(i => i.fotos.length > 0))
+      );
+
+      if (hasContent) {
+        setIsSavingDraft(true);
+        const ok = draftService.salvarRascunho(formData);
+        if (ok) {
+          const now = new Date();
+          setLastAutoSave(now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
+        }
+        setIsSavingDraft(false);
+      }
+    }, 1000);
+
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+    };
+  }, [formData]);
+
+  const handleRestoreDraft = () => {
+    if (draftInfo) {
+      setFormData(draftInfo.vistoria);
+      setShowDraftNotice(false);
+      setLastAutoSave(draftInfo.dataHoraFormatada);
+    }
+  };
+
+  const handleDiscardDraft = () => {
+    draftService.limparRascunho();
+    setDraftInfo(null);
+    setShowDraftNotice(false);
+  };
+
+  const handleManualSaveDraft = () => {
+    const ok = draftService.salvarRascunho(formData);
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    if (ok) {
+      setLastAutoSave(timeStr);
+      alert(`✅ Rascunho salvo com sucesso às ${timeStr}! Suas alterações estão seguras na memória do aparelho.`);
+    } else {
+      alert('Não foi possível salvar o rascunho localmente.');
+    }
+  };
+
+  // Safe and Optimized Photo Upload (Prevents memory exhaustion and mobile crashes)
+  const handlePhotoUpload = async (ambienteId: string, itemId?: string, filesList?: FileList | null) => {
+    if (!filesList || filesList.length === 0) return;
+    const files = Array.from(filesList);
+
+    try {
+      setIsOptimizing(true);
+      setOptimizingProgress({ current: 0, total: files.length });
+
+      // Run sequential compression and resizing
+      const optimizedResults = await optimizeMultipleImageFiles(files, (curr, total) => {
+        setOptimizingProgress({ current: curr, total });
+      });
+
+      const newPhotos: FotoItem[] = optimizedResults.map((opt, i) => ({
+        id: `ft-${Date.now()}-${Math.random().toString(36).substring(2, 7)}-${i}`,
+        url: opt.url,
+        descricao: files[i]?.name || 'Foto vistoria',
+        dataHora: new Date().toISOString(),
+      }));
+
+      setFormData((prev) => {
+        const updatedAmbientes = prev.ambientes.map((amb) => {
+          if (amb.id !== ambienteId) return amb;
+
+          if (itemId) {
+            const updatedItens = amb.itens.map((it) => {
+              if (it.id !== itemId) return it;
               return {
-                ...amb,
-                fotosGerais: [
-                  ...amb.fotosGerais,
-                  {
-                    id: 'ft-' + Date.now() + Math.random(),
-                    url,
-                    descricao: file.name,
-                    dataHora: new Date().toISOString(),
-                  },
-                ],
+                ...it,
+                fotos: [...it.fotos, ...newPhotos],
               };
-            }
-          });
-          return { ...prev, ambientes: updatedAmbientes };
+            });
+            return { ...amb, itens: updatedItens };
+          } else {
+            return {
+              ...amb,
+              fotosGerais: [...(amb.fotosGerais || []), ...newPhotos],
+            };
+          }
         });
-      };
-      reader.readAsDataURL(file);
+        return { ...prev, ambientes: updatedAmbientes };
+      });
+    } catch (err) {
+      console.error('Erro ao comprimir e salvar fotos:', err);
+      alert('Houve um erro ao processar as imagens selecionadas.');
+    } finally {
+      setIsOptimizing(false);
+      setOptimizingProgress(null);
+    }
+  };
+
+  // Remove photo from item or ambient
+  const handleRemovePhoto = (ambienteId: string, itemId?: string, photoId?: string) => {
+    setFormData((prev) => {
+      const updatedAmbientes = prev.ambientes.map((amb) => {
+        if (amb.id !== ambienteId) return amb;
+
+        if (itemId) {
+          const updatedItens = amb.itens.map((it) => {
+            if (it.id !== itemId) return it;
+            return {
+              ...it,
+              fotos: it.fotos.filter((f) => f.id !== photoId),
+            };
+          });
+          return { ...amb, itens: updatedItens };
+        } else {
+          return {
+            ...amb,
+            fotosGerais: (amb.fotosGerais || []).filter((f) => f.id !== photoId),
+          };
+        }
+      });
+      return { ...prev, ambientes: updatedAmbientes };
     });
   };
 
@@ -358,45 +467,120 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
       setStep(1);
       return;
     }
+    // Clear draft upon successful finalization
+    draftService.limparRascunho();
     onSave(formData);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-4xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-sm overflow-y-auto">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-4xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[92vh]">
         
         {/* Header */}
-        <div className="bg-slate-900 text-white p-5 flex items-center justify-between border-b border-slate-800">
-          <div>
-            <h2 className="text-lg font-bold">
-              {initialVistoria ? 'Editar Laudo de Vistoria' : 'Nova Vistoria de Imóvel'}
-            </h2>
+        <div className="bg-slate-900 text-white p-4 sm:p-5 flex items-center justify-between border-b border-slate-800 gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base sm:text-lg font-bold truncate">
+                {initialVistoria ? 'Editar Laudo de Vistoria' : 'Nova Vistoria de Imóvel'}
+              </h2>
+              {/* Auto-save status badge */}
+              {lastAutoSave && (
+                <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-950/80 text-emerald-300 border border-emerald-800/80">
+                  <Check className="w-3 h-3 text-emerald-400" />
+                  Salvo às {lastAutoSave}
+                </span>
+              )}
+              {isSavingDraft && (
+                <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-blue-950/80 text-blue-300 border border-blue-800/80 animate-pulse">
+                  <RefreshCw className="w-3 h-3 animate-spin text-blue-400" />
+                  Salvando...
+                </span>
+              )}
+            </div>
             <p className="text-xs text-slate-400">
               Passo {step} de 3 • {step === 1 ? 'Dados do Imóvel & Dormitórios' : step === 2 ? 'Inspecionar Cômodos & Checklist' : 'Finalizar & Salvar'}
             </p>
           </div>
-          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800">
-            <X className="w-5 h-5" />
-          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleManualSaveDraft}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700 transition-colors"
+              title="Salvar alterações agora para não perder se sair do app"
+            >
+              <Save className="w-3.5 h-3.5 text-blue-400" />
+              <span>Salvar Rascunho</span>
+            </button>
+            <button 
+              onClick={onClose} 
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+              title="Fechar janela"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Wizard Steps indicator */}
-        <div className="bg-slate-100 dark:bg-slate-800/60 px-6 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs font-semibold">
-          <div className={`flex items-center gap-2 ${step === 1 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500'}`}>
+        <div className="bg-slate-100 dark:bg-slate-800/60 px-4 sm:px-6 py-2.5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs font-semibold overflow-x-auto">
+          <div className={`flex items-center gap-2 shrink-0 ${step === 1 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500'}`}>
             <span className="w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900/60 flex items-center justify-center text-[10px]">1</span>
             Imóvel e Dormitórios
           </div>
-          <ChevronRight className="w-4 h-4 text-slate-400" />
-          <div className={`flex items-center gap-2 ${step === 2 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500'}`}>
+          <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+          <div className={`flex items-center gap-2 shrink-0 ${step === 2 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500'}`}>
             <span className="w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900/60 flex items-center justify-center text-[10px]">2</span>
             Cômodos ({formData.ambientes.length})
           </div>
-          <ChevronRight className="w-4 h-4 text-slate-400" />
-          <div className={`flex items-center gap-2 ${step === 3 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500'}`}>
+          <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+          <div className={`flex items-center gap-2 shrink-0 ${step === 3 ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500'}`}>
             <span className="w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900/60 flex items-center justify-center text-[10px]">3</span>
             Assinaturas & Concluir
           </div>
         </div>
+
+        {/* Restorable Draft Notification Banner */}
+        {showDraftNotice && draftInfo && (
+          <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 sm:px-6 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
+            <div className="flex items-start sm:items-center gap-2 text-xs text-amber-900 dark:text-amber-200">
+              <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
+              <span>
+                <strong>Rascunho recuperado:</strong> Foi encontrada uma vistoria não finalizada salva às {draftInfo.dataHoraFormatada} ({draftInfo.vistoria.imovel?.endereco || 'Sem endereço'} - {draftInfo.vistoria.inquilinoNome || 'Sem inquilino'}). Deseja continuar?
+              </span>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+              <button
+                type="button"
+                onClick={handleRestoreDraft}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-bold shadow-xs transition-colors"
+              >
+                Restaurar Vistoria
+              </button>
+              <button
+                type="button"
+                onClick={handleDiscardDraft}
+                className="px-2.5 py-1.5 text-slate-600 dark:text-slate-400 hover:text-rose-600 text-xs font-medium transition-colors"
+              >
+                Descartar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Real-time Image Optimization banner */}
+        {isOptimizing && (
+          <div className="bg-blue-600 text-white px-4 py-2.5 text-xs font-semibold flex items-center justify-between shadow-sm animate-pulse">
+            <div className="flex items-center gap-2">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>
+                Otimizando imagens para alta performance e evitando travamento no celular...
+                {optimizingProgress && ` (${optimizingProgress.current}/${optimizingProgress.total})`}
+              </span>
+            </div>
+            <span className="text-[11px] opacity-90">Comprimindo...</span>
+          </div>
+        )}
 
         {/* Body Content */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6">
@@ -841,6 +1025,84 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
                       </div>
                     </div>
 
+                    {/* Room Panoramic / General Photos Section */}
+                    <div className="bg-slate-100/90 dark:bg-slate-900/90 p-3 rounded-lg border border-slate-200 dark:border-slate-700/80 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <Camera className="w-4 h-4 text-blue-500" />
+                          <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                            Fotos Panorâmicas do Cômodo ({amb.fotosGerais?.length || 0})
+                          </span>
+                          <span className="text-[10px] text-slate-500 hidden sm:inline">(visão ampla do ambiente)</span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {/* Room Camera button */}
+                          <label
+                            className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-xs font-semibold shadow-xs transition-colors"
+                            title="Tirar foto do cômodo com a câmera"
+                          >
+                            <Camera className="w-3.5 h-3.5" />
+                            <span>Tirar Foto</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              multiple
+                              onChange={(e) => {
+                                handlePhotoUpload(amb.id, undefined, e.target.files);
+                                e.target.value = '';
+                              }}
+                              className="hidden"
+                            />
+                          </label>
+
+                          {/* Room Device Gallery button */}
+                          <label
+                            className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-md text-xs font-semibold border border-slate-300 dark:border-slate-600 shadow-xs transition-colors"
+                            title="Escolher fotos existentes da galeria do aparelho"
+                          >
+                            <Upload className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                            <span>Galeria / Dispositivo</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              onChange={(e) => {
+                                handlePhotoUpload(amb.id, undefined, e.target.files);
+                                e.target.value = '';
+                              }}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* General Photos Thumbnails Strip */}
+                      {amb.fotosGerais && amb.fotosGerais.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-200 dark:border-slate-800">
+                          {amb.fotosGerais.map((ft, fIdx) => (
+                            <div key={ft.id || fIdx} className="relative group w-14 h-14 rounded-lg overflow-hidden border border-slate-300 dark:border-slate-600 bg-slate-900 shadow-xs">
+                              <img
+                                src={ft.url}
+                                alt={`Foto geral ${fIdx + 1}`}
+                                className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                onClick={() => setPreviewImage({ url: ft.url, title: `Visão Geral - ${amb.nome} (${fIdx + 1})` })}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleRemovePhoto(amb.id, undefined, ft.id)}
+                                className="absolute top-0.5 right-0.5 p-1 bg-rose-600/90 text-white rounded-full hover:bg-rose-700 shadow"
+                                title="Excluir foto"
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
                     {/* Room items checklist */}
                     <div className="space-y-3">
                       {amb.itens.map((item) => (
@@ -894,8 +1156,8 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
                             </div>
                           </div>
 
-                          {/* Observação e Foto input */}
-                          <div className="flex flex-col sm:flex-row items-center gap-2">
+                          {/* Observação e Botões de Fotos */}
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                             <input
                               type="text"
                               placeholder="Observações do item (ex: furos, riscos, manchas, trincas...)"
@@ -913,19 +1175,47 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
                               className="flex-1 p-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded text-xs text-slate-900 dark:text-white"
                             />
 
-                            {/* Photo Upload for Item */}
-                            <label className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 rounded text-[11px] font-medium text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
-                              <Camera className="w-3.5 h-3.5 text-blue-500" />
-                              <span>{item.fotos.length > 0 ? `${item.fotos.length} Foto(s)` : 'Foto'}</span>
-                              <input
-                                type="file"
-                                accept="image/*"
-                                capture="environment"
-                                multiple
-                                onChange={(e) => handlePhotoUpload(amb.id, item.id, e)}
-                                className="hidden"
-                              />
-                            </label>
+                            {/* Dual Photo Controls: Camera & Device Gallery */}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {/* Camera Button */}
+                              <label 
+                                className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-[11px] font-semibold shadow-xs transition-colors"
+                                title="Tirar foto diretamente com a câmera do celular"
+                              >
+                                <Camera className="w-3.5 h-3.5" />
+                                <span>Câmera</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  capture="environment"
+                                  multiple
+                                  onChange={(e) => {
+                                    handlePhotoUpload(amb.id, item.id, e.target.files);
+                                    e.target.value = '';
+                                  }}
+                                  className="hidden"
+                                />
+                              </label>
+
+                              {/* Gallery / Device Upload Button */}
+                              <label 
+                                className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded text-[11px] font-semibold border border-slate-300 dark:border-slate-600 shadow-xs transition-colors"
+                                title="Escolher fotos da galeria do celular ou arquivos"
+                              >
+                                <Upload className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                <span>Galeria</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  multiple
+                                  onChange={(e) => {
+                                    handlePhotoUpload(amb.id, item.id, e.target.files);
+                                    e.target.value = '';
+                                  }}
+                                  className="hidden"
+                                />
+                              </label>
+                            </div>
 
                             {/* Remove Item */}
                             <button
@@ -940,12 +1230,39 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
                                 });
                                 setFormData({ ...formData, ambientes: ambList });
                               }}
-                              className="text-slate-400 hover:text-rose-600 p-1"
+                              className="text-slate-400 hover:text-rose-600 p-1 self-center"
                               title="Excluir item"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
+
+                          {/* Item Attached Photos Thumbnails */}
+                          {item.fotos && item.fotos.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                              <span className="text-[10px] font-semibold text-slate-500">
+                                {item.fotos.length} foto(s):
+                              </span>
+                              {item.fotos.map((ft, fIdx) => (
+                                <div key={ft.id || fIdx} className="relative group w-12 h-12 rounded-md overflow-hidden border border-slate-300 dark:border-slate-700 bg-slate-900 shadow-xs">
+                                  <img
+                                    src={ft.url}
+                                    alt={item.nome}
+                                    className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                    onClick={() => setPreviewImage({ url: ft.url, title: `${amb.nome} - ${item.nome} (${fIdx + 1})` })}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemovePhoto(amb.id, item.id, ft.id)}
+                                    className="absolute top-0.5 right-0.5 p-0.5 bg-rose-600/90 text-white rounded-full hover:bg-rose-700 shadow"
+                                    title="Excluir foto"
+                                  >
+                                    <X className="w-2.5 h-2.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -990,44 +1307,85 @@ export const VistoriaFormModal: React.FC<VistoriaFormModalProps> = ({
         </div>
 
         {/* Footer Navigation */}
-        <div className="p-4 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
-          {step > 1 ? (
-            <button
-              type="button"
-              onClick={() => setStep(step - 1)}
-              className="inline-flex items-center gap-1 px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-lg text-xs font-semibold"
-            >
-              <ChevronLeft className="w-4 h-4" />
-              Anterior
-            </button>
-          ) : (
-            <button type="button" onClick={onClose} className="px-4 py-2 text-xs font-medium text-slate-500">
-              Cancelar
-            </button>
-          )}
+        <div className="p-3 sm:p-4 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            {step > 1 ? (
+              <button
+                type="button"
+                onClick={() => setStep(step - 1)}
+                className="inline-flex items-center gap-1 px-3 sm:px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-lg text-xs font-semibold hover:bg-slate-300 dark:hover:bg-slate-700 transition-colors"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                Anterior
+              </button>
+            ) : (
+              <button type="button" onClick={onClose} className="px-3 sm:px-4 py-2 text-xs font-medium text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                Cancelar
+              </button>
+            )}
 
-          {step < 3 ? (
             <button
               type="button"
-              onClick={() => setStep(step + 1)}
-              className="inline-flex items-center gap-1 px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold shadow"
+              onClick={handleManualSaveDraft}
+              className="inline-flex items-center gap-1 px-2.5 sm:px-3 py-2 bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 transition-colors"
+              title="Salvar rascunho manualmente"
             >
-              Próximo
-              <ChevronRight className="w-4 h-4" />
+              <Save className="w-3.5 h-3.5 text-blue-500" />
+              <span className="hidden xs:inline">Salvar Rascunho</span>
+              <span className="xs:hidden">Salvar</span>
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleFinish}
-              className="inline-flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-900/30"
-            >
-              <Check className="w-4 h-4" />
-              Salvar Laudo no Banco
-            </button>
-          )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {step < 3 ? (
+              <button
+                type="button"
+                onClick={() => setStep(step + 1)}
+                className="inline-flex items-center gap-1 px-4 sm:px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
+              >
+                Próximo
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleFinish}
+                className="inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-900/30 transition-colors"
+              >
+                <Check className="w-4 h-4" />
+                Salvar Laudo no Banco
+              </button>
+            )}
+          </div>
         </div>
 
       </div>
+
+      {/* Fullscreen Photo Lightbox Modal */}
+      {previewImage && (
+        <div 
+          className="fixed inset-0 z-60 bg-black/90 flex flex-col items-center justify-center p-4"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div className="max-w-4xl w-full flex flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            <div className="w-full flex items-center justify-between text-white px-2">
+              <span className="text-xs sm:text-sm font-semibold truncate">{previewImage.title}</span>
+              <button
+                type="button"
+                onClick={() => setPreviewImage(null)}
+                className="p-1.5 bg-white/20 hover:bg-white/30 rounded-full text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <img
+              src={previewImage.url}
+              alt="Ampliada"
+              className="max-h-[80vh] max-w-full rounded-lg object-contain shadow-2xl border border-white/20"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

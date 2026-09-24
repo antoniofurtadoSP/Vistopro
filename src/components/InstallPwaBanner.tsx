@@ -48,7 +48,9 @@ export const InstallPwaBanner: React.FC<InstallPwaBannerProps> = ({ logoUrl }) =
   const [copied, setCopied] = useState(false);
   const isInIframe = window.self !== window.top;
 
-  const directAppUrl = 'https://ais-pre-g6cjlzozoq7ixweq3mv24q-494905315042.us-east1.run.app';
+  const directAppUrl = typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null'
+    ? window.location.origin
+    : 'https://ais-pre-g6cjlzozoq7ixweq3mv24q-494905315042.us-east1.run.app';
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(directAppUrl);

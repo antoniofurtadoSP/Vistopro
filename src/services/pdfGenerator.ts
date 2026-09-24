@@ -1,13 +1,104 @@
 import jsPDF from 'jspdf';
 import { Vistoria, EmpresaInfo } from '../types';
+import { OFFICIAL_LOGO_BASE64, OFFICIAL_BLOGGER_LOGO_URL, LOCAL_LOGO_URL } from '../assets/defaultLogo';
 
-async function loadImageAsBase64(url: string): Promise<string | null> {
-  if (!url) return null;
-  if (url.startsWith('data:image')) return url;
+interface LoadedImageInfo {
+  dataUrl: string;
+  width: number;
+  height: number;
+  aspectRatio: number;
+}
 
+/**
+ * Carrega a imagem com segurança, resolvendo CORS, URLs locais e fallback base64
+ */
+export async function loadImageDetails(url?: string): Promise<LoadedImageInfo | null> {
+  if (!url || !url.trim()) {
+    return {
+      dataUrl: OFFICIAL_LOGO_BASE64,
+      width: 1078,
+      height: 210,
+      aspectRatio: 1078 / 210,
+    };
+  }
+
+  // Se for a URL oficial do Blogger, logo local ou vazia, usa a base64 direta (evita bloqueio CORS do Blogger)
+  if (
+    url === OFFICIAL_BLOGGER_LOGO_URL ||
+    url.includes('blogger.googleusercontent.com') ||
+    url.includes('logo.jpg') ||
+    url === LOCAL_LOGO_URL
+  ) {
+    return {
+      dataUrl: OFFICIAL_LOGO_BASE64,
+      width: 1078,
+      height: 210,
+      aspectRatio: 1078 / 210,
+    };
+  }
+
+  // Se já for data URL base64
+  if (url.startsWith('data:image')) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const w = img.naturalWidth || img.width || 800;
+        const h = img.naturalHeight || img.height || 600;
+        resolve({
+          dataUrl: url,
+          width: w,
+          height: h,
+          aspectRatio: w / (h || 1),
+        });
+      };
+      img.onerror = () => {
+        resolve({
+          dataUrl: url,
+          width: 800,
+          height: 600,
+          aspectRatio: 800 / 600,
+        });
+      };
+      img.src = url;
+    });
+  }
+
+  // Para URLs externas gerais, tenta primeiro fetch -> blob -> base64
+  try {
+    const res = await fetch(url, { mode: 'cors' });
+    if (res.ok) {
+      const blob = await res.blob();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const w = img.naturalWidth || img.width || 800;
+          const h = img.naturalHeight || img.height || 600;
+          resolve({
+            dataUrl,
+            width: w,
+            height: h,
+            aspectRatio: w / (h || 1),
+          });
+        };
+        img.onerror = () => resolve({ dataUrl, width: 800, height: 600, aspectRatio: 800 / 600 });
+        img.src = dataUrl;
+      });
+    }
+  } catch (e) {
+    // Ignora erro de fetch e tenta via elemento Image
+  }
+
+  // Fallback via Canvas
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'Anonymous';
+    img.referrerPolicy = 'no-referrer';
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
@@ -19,17 +110,27 @@ async function loadImageAsBase64(url: string): Promise<string | null> {
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, w, h);
-          resolve(canvas.toDataURL('image/jpeg', 0.92));
-        } else {
-          resolve(null);
+          resolve({
+            dataUrl: canvas.toDataURL('image/jpeg', 0.92),
+            width: w,
+            height: h,
+            aspectRatio: w / (h || 1),
+          });
+          return;
         }
-      } catch (e) {
-        resolve(null);
+      } catch (err) {
+        // Tainted canvas
       }
+      resolve(null);
     };
     img.onerror = () => resolve(null);
     img.src = url;
   });
+}
+
+async function loadImageAsBase64(url: string): Promise<string | null> {
+  const info = await loadImageDetails(url);
+  return info ? info.dataUrl : null;
 }
 
 export async function generateVistoriaPdf(vistoria: Vistoria, empresa: EmpresaInfo) {
@@ -64,26 +165,39 @@ export async function generateVistoriaPdf(vistoria: Vistoria, empresa: EmpresaIn
   }
 
   // --- TOP BANNER (ANTONIO FURTADO LOGO) ---
-  const bannerLogoUrl = empresa.logoUrl || 'https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEjQCg77zUT43bZxFpwtQv8VnbT6iNll_bgvVVG9xRlvSVzZ6IL25hl4cjtp0ZZZh3YwIlykgT0jn5SYPBIxjMSFzzmc1YwbUBmLCY8_9hVMFX6_UhlSAe_Zmmy52tkhPuFCIRUmEWccW6r493-6dX9k6lyHbXYvWieQ21xAzo59aryPb1mcvb6juDpp0Zo/s1600/logo.jpg';
+  const bannerLogoUrl = empresa.logoUrl || OFFICIAL_BLOGGER_LOGO_URL;
+  const bannerBoxHeight = 31;
   
   doc.setFillColor(255, 255, 255);
-  doc.rect(margin, y, pageWidth - margin * 2, 28, 'F');
+  doc.rect(margin, y, pageWidth - margin * 2, bannerBoxHeight, 'F');
   doc.setDrawColor(203, 213, 225);
-  doc.roundedRect(margin, y, pageWidth - margin * 2, 28, 1, 1, 'S');
+  doc.roundedRect(margin, y, pageWidth - margin * 2, bannerBoxHeight, 1, 1, 'S');
 
   try {
-    const logoBase64 = await loadImageAsBase64(bannerLogoUrl);
-    if (logoBase64) {
-      doc.addImage(logoBase64, 'JPEG', pageWidth / 2 - 30, y + 2, 60, 18);
+    const logoInfo = await loadImageDetails(bannerLogoUrl);
+    if (logoInfo && logoInfo.dataUrl) {
+      // Proporção matemática real da imagem para não distorcer
+      const maxW = 92;
+      const maxH = 16.5;
+      const ratio = logoInfo.aspectRatio > 0 ? logoInfo.aspectRatio : 5.133;
+      let renderW = maxW;
+      let renderH = maxW / ratio;
+      if (renderH > maxH) {
+        renderH = maxH;
+        renderW = maxH * ratio;
+      }
+      const renderX = (pageWidth - renderW) / 2;
+      const renderY = y + 2 + (maxH - renderH) / 2;
+      doc.addImage(logoInfo.dataUrl, 'JPEG', renderX, renderY, renderW, renderH);
     } else {
       doc.setFont('georgia', 'bold');
-      doc.setFontSize(16);
+      doc.setFontSize(15);
       doc.setTextColor(11, 34, 64);
       doc.text('ANTONIO FURTADO', pageWidth / 2, y + 10, { align: 'center' });
     }
   } catch (e) {
     doc.setFont('georgia', 'bold');
-    doc.setFontSize(16);
+    doc.setFontSize(15);
     doc.setTextColor(11, 34, 64);
     doc.text('ANTONIO FURTADO', pageWidth / 2, y + 10, { align: 'center' });
   }
@@ -91,14 +205,14 @@ export async function generateVistoriaPdf(vistoria: Vistoria, empresa: EmpresaIn
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(7.5);
   doc.setTextColor(11, 34, 64);
-  doc.text(`CONSULTOR IMOBILIÁRIO • CRECI ${empresa.creci || '208024'}`, pageWidth / 2, y + 22, { align: 'center' });
+  doc.text(`CONSULTOR IMOBILIÁRIO • CRECI ${empresa.creci || '208024'}`, pageWidth / 2, y + 22.5, { align: 'center' });
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7);
   doc.setTextColor(71, 85, 105);
-  doc.text('www.antoniofurtado.com.br  •  WhatsApp (11) 96904-3012', pageWidth / 2, y + 26, { align: 'center' });
+  doc.text('www.antoniofurtado.com.br  •  WhatsApp (11) 96904-3012', pageWidth / 2, y + 26.5, { align: 'center' });
 
-  y += 32;
+  y += bannerBoxHeight + 5;
 
   // --- LAUDO HEADER ---
   doc.setFillColor(15, 23, 42); // slate-900 header block
